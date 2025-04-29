@@ -3,12 +3,102 @@ title: "Weather"
 format: html
 editor: visual
 ---
+
 ```{r}
 library(dplyr)
 library(tidyverse)
 library(readr)
 library(janitor)
 library(lubridate)
+library(randomForest)
+library(gbm)
+library(caret)
+library(pROC)
+```
+
+```{r}
+flight_2023 <- read_csv("T_ONTIME_REPORTING_2023.csv")
+flight_2023 <- clean_names(flight_2023)
+flight_2023 <- flight_2023[, !(names(flight_2023) %in% c("origin_state_abr", "dest_state_abr"))]
+flight_2024 <- read_csv("T_ONTIME_REPORTING 4.csv")
+flight_2024 <- clean_names(flight_2024)
+
+# Define a function to format the time columns
+convert_time_column <- function(flight_data, column_name) {
+  formatted_times <- sprintf("%04s", flight_data[[column_name]])
+  formatted_times <- paste0(substr(formatted_times, 1, 2), ":", substr(formatted_times, 3, 4))
+  flight_data[[column_name]] <- as.POSIXct(formatted_times, format = "%H:%M")
+  flight_data[[column_name]] <- format(flight_data[[column_name]], "%H:%M")
+  return(flight_data)
+}
+
+# List the columns to convert
+time_columns <- c("dep_time", "arr_time", "crs_dep_time", "crs_arr_time") # Add more columns if necessary
+
+# Loop through the columns and apply the conversion
+for (column in time_columns) {
+  flight_2023 <- convert_time_column(flight_2023, column)
+}
+# Convert date
+flight_2023$fl_date <- as.POSIXct(flight_2023$fl_date, format = "%m/%d/%Y %I:%M:%S %p")
+flight_2023$fl_date <- format(flight_2023$fl_date, "%m/%d/%Y")
+flight_2024$fl_date <- as.POSIXct(flight_2024$fl_date, format = "%m/%d/%Y %I:%M:%S %p")
+flight_2024$fl_date <- format(flight_2024$fl_date, "%m/%d/%Y")
+
+flight_2023 <- flight_2023 |> 
+  filter(!is.na(dep_delay) & !is.na(dep_del15) & !is.na(arr_delay))
+flight_2024 <- flight_2024 |>
+  filter(!is.na(dep_delay) & !is.na(dep_del15) & !is.na(arr_delay))
+flight_2023 <- flight_2023 |>
+mutate(delay_reason = case_when(
+    !is.na(carrier_delay) & carrier_delay > 0 ~ "Carrier",
+    !is.na(weather_delay) & weather_delay > 0 ~ "Weather",
+    !is.na(nas_delay) & nas_delay > 0 ~ "NAS",
+    !is.na(security_delay) & security_delay > 0 ~ "Security",
+    !is.na(late_aircraft_delay) & late_aircraft_delay > 0 ~ "Late Aircraft",
+    TRUE ~ "Unknown"
+  )) 
+flight_2024 <- flight_2024 |>
+mutate(delay_reason = case_when(
+    !is.na(carrier_delay) & carrier_delay > 0 ~ "Carrier",
+    !is.na(weather_delay) & weather_delay > 0 ~ "Weather",
+    !is.na(nas_delay) & nas_delay > 0 ~ "NAS",
+    !is.na(security_delay) & security_delay > 0 ~ "Security",
+    !is.na(late_aircraft_delay) & late_aircraft_delay > 0 ~ "Late Aircraft",
+    TRUE ~ "Unknown"
+  )) 
+
+```
+
+```{r}
+top10_airport_23 <- flight_2023 |>
+  group_by(origin) |>
+  summarize(count = n()) |>
+  arrange(desc(count)) |>
+    slice_head(n = 10)
+
+top5_carrier_23 <- flight_2023 |>
+  group_by(op_unique_carrier) |>
+  summarize(count = n()) |>
+  arrange(desc(count)) |>
+    slice_head(n = 5)
+
+flight_2023_filtered <- flight_2023 |> 
+  filter(origin %in% top10_airport_23$origin, op_unique_carrier %in% top5_carrier_23$op_unique_carrier)
+
+flight_2024_filtered <- flight_2024 |> 
+  filter(origin %in% top10_airport_23$origin, op_unique_carrier %in% top5_carrier_23$op_unique_carrier)
+
+flight_2023_filtered <- flight_2023_filtered |>
+  mutate(dep_hour_planned =str_extract(flight_2023_filtered$crs_dep_time, "[0-9]{2}"),
+         dep_period = ifelse(dep_hour_planned %in% c("06", "07", "08", "09", "10", "11"), "morning", 
+                             ifelse(dep_hour_planned %in% c("12", "13", "14", "15","16", "17"), "afternoon",
+                                    ifelse(dep_hour_planned %in% c("18", "19", "20", "21", "22", "23"), "night", "midnight"))))
+flight_2024_filtered <- flight_2024_filtered |>
+  mutate(dep_hour_planned =str_extract(flight_2024_filtered$crs_dep_time, "[0-9]{2}"),
+         dep_period = ifelse(dep_hour_planned %in% c("06", "07", "08", "09", "10", "11"), "morning", 
+                             ifelse(dep_hour_planned %in% c("12", "13", "14", "15","16", "17"), "afternoon",
+                                    ifelse(dep_hour_planned %in% c("18", "19", "20", "21", "22", "23"), "night", "midnight"))))
 ```
 
 ```{r}
@@ -24,7 +114,7 @@ weather2023 <- weather2023 |>
                            station == "USW00013874" ~ "ATL"))
 #Format weather date
 weather2023$date <- format(weather2023$date, "%m/%d/%Y")
-#Filter flight dataset to ATL
+#Filter flight dataset to six airports
 flight_23 <- flight_2023_filtered |>
   filter(origin == c("ATL", "ORD", "LAS", "DEN", "LGA", "DFW"))
 #Join flight and weather dataset
@@ -82,7 +172,7 @@ sum(is.na(weather2024$tavg
 train_weather <- flight_23_full
 set.seed(42)  # for reproducibility
 n_2024_weather <- nrow(flight_24_full)
-test_indices <- sample(1:n_2024__weather, size = 0.3 * n_2024_weather)
+test_indices <- sample(1:n_2024_weather, size = 0.3 * n_2024_weather)
 
 test_weather <- flight_24_full[test_indices, ] 
 train_weather$weather <- factor(train_weather$weather)
@@ -97,7 +187,7 @@ rf_preds_weather <- predict(rf.fit_weather, newdata = test_weather, type = "resp
 # Confusion matrix to evaluate performance
 confusion_matrix <- table(predicted = rf_preds_weather, actual = test_weather$weather)
 print(confusion_matrix)
-mean(rf_preds_weather == test_atl$weather)
+mean(rf_preds_weather == test_weather$weather)
 varImpPlot(rf.fit_weather)
 
 
@@ -112,10 +202,288 @@ rf.fit.w <- randomForest(dep_del15 ~ op_unique_carrier + distance + dep_period +
 rf_preds_w <- predict(rf.fit.w, newdata = test_weather, type = "response")
 
 
+
 # Confusion matrix to evaluate performance
 confusion_matrix <- table(predicted = rf_preds_w, actual = test_weather$dep_del15)
 print(confusion_matrix)
 mean(rf_preds_w == test_weather$dep_del15)
 varImpPlot(rf.fit.w)
+
+vi_rf <- importance(rf.fit.w)
+vi_rf_df <- data.frame(
+  Variable = rownames(vi_rf),
+  Importance = vi_rf[, "MeanDecreaseGini"]
+)
+
+# Sort by descending importance
+vi_rf_df <- vi_rf_df[order(vi_rf_df$Importance, decreasing = TRUE), ]
+ggplot(vi_rf_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Random Forest Variable Importance",
+       x = "Variable",
+       y = "Mean Decrease in Gini") +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12))
+
 ```
 
+```{r}
+#Improve random forest using cross validation
+control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+# Convert target to "Yes"/"No" if needed for twoClassSummary
+y_train_factor <- ifelse(y_train == 1, "Yes", "No")
+
+tunegrid <- expand.grid(.mtry = c(2, 4, 6, 8))
+
+rf_cv_auc <- train(
+  x = x_train,
+  y = as.factor(y_train_factor),
+  method = "rf",
+  trControl = control,
+  tuneGrid = tunegrid,
+  metric = "ROC",
+  ntree = 500
+)
+rf_cv_auc$bestTune
+
+# View AUC for each mtry
+rf_cv_auc$results[, c("mtry", "ROC")]
+# Get best mtry from cross-validated model
+best_mtry <- rf_cv_auc$bestTune$mtry
+
+# Refit Random Forest on the full training data
+final_rf_model <- randomForest(
+  x = x_train,
+  y = as.factor(y_train_factor),  # Use original binary factor: "Yes"/"No"
+  mtry = best_mtry,
+  ntree = 500
+)
+
+# Convert y_test to factor ("Yes"/"No")
+y_test_factor <- ifelse(y_test == 1, "Yes", "No")
+
+# Predict probabilities for ROC/AUC
+rf_probs <- predict(final_rf_model, newdata = x_test, type = "prob")[, "Yes"]
+
+# Predict classes
+rf_preds <- predict(final_rf_model, newdata = x_test)
+
+# Confusion matrix
+confusionMatrix(rf_preds, as.factor(y_test_factor))
+
+# AUC
+library(pROC)
+rf_auc <- roc(y_test_factor, rf_probs)
+rf_auc$auc
+
+
+```
+
+```{r}
+colSums(is.na(train_weather))
+
+train_weather$dep_del15 <- as.numeric(train_weather$dep_del15)
+test_weather$dep_del15 <- as.numeric(test_weather$dep_del15)
+train_weather$op_unique_carrier <- as.factor(train_weather$op_unique_carrier)
+train_weather$dep_period <- as.factor(train_weather$dep_period)
+
+test_weather$op_unique_carrier <- factor(test_weather$op_unique_carrier, levels = levels(train_weather$op_unique_carrier))
+test_weather$dep_period <- factor(test_weather$dep_period, levels = levels(train_weather$dep_period))
+
+
+#Boosting
+boost.fit <- gbm(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin,
+                         data = train_weather, 
+                         distribution = "bernoulli", n.trees = 5000, interaction.depth = 4)
+
+# Get predicted probabilities (values between 0 and 1)
+yhat.boost <- predict(boost.fit, newdata = test_weather, n.trees = 5000, type = "response")
+# If predicted probability > 0.5, predict 1 (delayed); otherwise 0 (on time)
+yhat.class <- ifelse(yhat.boost > 0.5, 1, 0)
+
+# Actual values
+y_true <- test_weather$dep_del15
+
+# Calculate accuracy
+accuracy <- mean(yhat.class == y_true)
+accuracy
+
+#Refit with cross validation
+boost.fit2 <- gbm(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin,
+                 data = train_weather, 
+                 distribution = "bernoulli",
+                 n.trees = 5000, 
+                 interaction.depth = 3, 
+                 shrinkage = 0.01,
+                 cv.folds = 5,        # Add cross-validation!
+                 n.cores = NULL,       # Use all cores
+                 verbose = FALSE)
+best.iter <- gbm.perf(boost.fit2, method = "cv") #Optimal number of trees ~ 1800
+yhat.boost <- predict(boost.fit2, newdata = test_weather, n.trees = best.iter, type = "response")
+yhat.boost.class <- ifelse(yhat.boost > 0.5, 1, 0)
+mean(yhat.boost.class == test_weather$dep_del15)
+
+
+vi_boost <- summary(boost.fit, n.trees = best.iter, plotit = FALSE)
+
+# It already returns a data.frame with columns 'var' and 'rel.inf'
+# Rename columns for clarity
+colnames(vi_boost) <- c("Variable", "Importance")
+
+# Sort descending
+vi_boost <- vi_boost[order(vi_boost$Importance, decreasing = TRUE), ]
+ggplot(vi_boost, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "coral") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Boosting Variable Importance",
+       x = "Variable",
+       y = "Relative Influence (%)") +
+  theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12))
+
+
+
+
+```
+
+```{r}
+library(xgboost)
+# Prepare your data as a matrix
+x_train <- model.matrix(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin, data = train_weather)[, -1]
+y_train <- train_weather$dep_del15
+x_test <- model.matrix(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin, data = test_weather)[, -1]
+
+
+xgb.fit <- xgboost(data = x_train, label = y_train,
+                   nrounds = 1000, objective = "reg:squarederror",
+                   max_depth = 4, eta = 0.1, early_stopping_rounds = 10,
+                   verbose = 0)
+# Get feature names from matrix
+feature_names <- colnames(x_train)
+
+# Extract importance
+xgb.imp <- xgb.importance(feature_names = feature_names, model = xgb.fit)
+head(xgb.imp)
+xgb.plot.importance(xgb.imp, top_n = 20, measure = "Gain",
+                    rel_to_first = TRUE, xlab = "Relative Importance")
+
+#Improve using CV
+cv_results <- xgb.cv(
+  data = x_train, 
+  label = y_train, 
+  nrounds = 1000,             # Number of boosting rounds
+  objective = "binary:logistic",  # Binary classification task
+  max_depth = 4,              # Depth of trees
+  eta = 0.1,                  # Learning rate
+  early_stopping_rounds = 10, # Stop if no improvement in 10 rounds
+  nfold = 5,                 # 5-fold cross-validation
+  verbose = 0,                # Disable verbose output
+  metric = "auc"              # Optimize for AUC
+)
+cat("Best AUC:", min(cv_results$evaluation_log$test_auc_mean), "\n")
+cat("Best number of rounds:", cv_results$best_iteration, "\n")
+
+# Train the final model with the best number of rounds
+xgb.fit <- xgboost(
+  data = x_train, 
+  label = y_train, 
+  nrounds = cv_results$best_iteration,
+  objective = "binary:logistic",
+  max_depth = 4, 
+  eta = 0.1, 
+  verbose = 0
+)
+feature_names <- colnames(x_train)
+
+# Extract importance
+xgb.imp <- xgb.importance(feature_names = feature_names, model = xgb.fit)
+head(xgb.imp)
+xgb.plot.importance(xgb.imp, top_n = 20, measure = "Gain",
+                    rel_to_first = TRUE, xlab = "Relative Importance")
+```
+
+```{r}
+# GBM variable importance (already extracted)
+vi_gbm <- summary(boost.fit2, n.trees = best.iter, plotit = FALSE)
+colnames(vi_gbm) <- c("Variable", "Importance")
+vi_gbm$Model <- "GBM"
+# Assuming xgb.fit and x_train already created
+xgb_imp <- xgb.importance(feature_names = colnames(x_train), model = xgb.fit)
+vi_xgb <- xgb_imp[, c("Feature", "Gain")]
+colnames(vi_xgb) <- c("Variable", "Importance")
+vi_xgb$Model <- "XGBoost"
+
+# Normalize each model's importance (optional but helps visually)
+vi_all <- bind_rows(vi_gbm, vi_xgb) %>%
+  group_by(Model) %>%
+  mutate(Importance = Importance / max(Importance) * 100) %>%
+  ungroup()
+
+library(ggplot2)
+
+# Top 10 variables per model
+top_vars <- vi_all %>%
+  group_by(Model) %>%
+  top_n(10, Importance)
+
+ggplot(top_vars, aes(x = reorder(Variable, Importance), y = Importance, fill = Model)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~Model, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Variable Importance: GBM vs. XGBoost",
+       x = "Variable",
+       y = "Relative Importance (%)") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        strip.text = element_text(size = 14),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 13))
+
+```
+
+```{r}
+
+# True labels (0 or 1)
+y_test <- test_weather$dep_del15  
+
+# Predictions (raw probabilities)
+prob_gbm <- predict(boost.fit2, newdata = test_weather, n.trees = best.iter, type = "response")
+prob_xgb <- predict(xgb.fit, newdata = x_test)
+prob_rf  <- predict(rf.fit.w, newdata = test_weather, type = "prob")[,2]
+
+# Convert probabilities to class predictions (threshold = 0.5)
+pred_gbm <- ifelse(prob_gbm > 0.5, 1, 0)
+pred_xgb <- ifelse(prob_xgb > 0.5, 1, 0)
+pred_rf  <- ifelse(prob_rf  > 0.5, 1, 0)
+
+# Confusion matrix & Accuracy
+cm_gbm <- confusionMatrix(factor(pred_gbm), factor(y_test))
+cm_xgb <- confusionMatrix(factor(pred_xgb), factor(y_test))
+cm_rf <- confusionMatrix(factor(pred_rf),  factor(y_test))
+cm_gbm
+# AUC
+auc_gbm <- roc(y_test, prob_gbm)$auc
+auc_xgb <- roc(y_test, prob_xgb)$auc
+auc_rf  <- roc(y_test, prob_rf)$auc
+
+#Accuracy
+accuracy_gbm <- cm_gbm$overall["Accuracy"]
+accuracy_xgb <- cm_xgb$overall["Accuracy"]
+accuracy_rf <- cm_rf$overall["Accuracy"]
+# Summary
+data.frame(Model = c("GBM", "XGBoost", "Random Forest"),
+           AUC   = c(auc_gbm, auc_xgb, auc_rf),
+           Accuracy = c(accuracy_gbm, accuracy_xgb, accuracy_rf))
+
+```
