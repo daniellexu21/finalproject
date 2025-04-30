@@ -14,6 +14,7 @@ library(randomForest)
 library(gbm)
 library(caret)
 library(pROC)
+library(ggplot2)
 library(xgboost)
 library(knitr)
 library(kableExtra)
@@ -140,8 +141,8 @@ flight_23_full |>
   summarise("Mean Precipitation" = mean(prcp),
             "Average wind speed" = mean(awnd))
 sum(is.na(weather2023$prcp))
-saveRDS(flight_23_full, file = "flight_23_full.rds")
 
+saveRDS(flight_23_full, file = "flight_23_full.rds")
 
 ```
 
@@ -178,6 +179,7 @@ flight_24_full |>
             "Average wind speed" = mean(awnd))
 sum(is.na(weather2024$tavg
           ))
+
 saveRDS(flight_24_full, file = "flight_24_full.rds")
 
 ```
@@ -197,6 +199,10 @@ test_weather$weather <- factor(test_weather$weather, levels = levels(train_weath
 train_weather$dep_del15 <- factor(train_weather$dep_del15, levels = c(0, 1))
 test_weather$dep_del15 <- factor(test_weather$dep_del15, levels = c(0, 1))
 
+test_weather <- flight_24_full[test_indices, ] 
+train_weather$weather <- factor(train_weather$weather)
+test_weather$weather <- factor(test_weather$weather, levels = levels(train_weather$weather))
+
 rf.fit_weather <- randomForest(weather ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin,
                          data = train_weather, 
                          importance = TRUE, 
@@ -209,7 +215,12 @@ print(confusion_matrix)
 mean(rf_preds_weather == test_weather$weather)
 varImpPlot(rf.fit_weather)
 
-#Departure delay > 15 as response
+
+
+
+#Delay for 15 minutes or more as response variable
+train_weather$dep_del15 <- factor(train_weather$dep_del15, levels = c(0, 1))
+test_weather$dep_del15 <- factor(test_weather$dep_del15, levels = c(0, 1))
 
 rf.fit.w <- randomForest(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin,
                          data = train_weather, 
@@ -217,8 +228,6 @@ rf.fit.w <- randomForest(dep_del15 ~ op_unique_carrier + distance + dep_period +
                          ntree = 5000)
 rf_preds_w <- predict(rf.fit.w, newdata = test_weather, type = "response")
 
-
-rf_preds_w
 
 # Confusion matrix to evaluate performance
 confusion_matrix <- table(predicted = rf_preds_w, actual = test_weather$dep_del15)
@@ -254,6 +263,7 @@ x_train <- model.matrix(dep_del15 ~ op_unique_carrier + distance + dep_period + 
 y_train <- train_weather$dep_del15
 x_test <- model.matrix(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin, data = test_weather)[, -1]
 y_test <- test_weather$dep_del15  
+
 #Improve random forest using cross validation
 control <- trainControl(
   method = "cv",
@@ -284,6 +294,7 @@ rf_cv_auc$results[, c("mtry", "ROC")]
 best_mtry <- rf_cv_auc$bestTune$mtry
 
 # Refit Random Forest on the full training data
+
 rf.fit.w <- randomForest(
   x = x_train,
   y = as.factor(y_train_factor),  # Use original binary factor: "Yes"/"No"
@@ -295,6 +306,7 @@ rf.fit.w <- randomForest(
 y_test_factor <- ifelse(y_test == 1, "Yes", "No")
 
 # Predict probabilities for ROC/AUC
+
 rf_probs <- predict(rf.fit.w, newdata = x_test, type = "prob")[, "Yes"]
 
 # Predict classes
@@ -305,6 +317,14 @@ conf_mat <- confusionMatrix(rf_preds, as.factor(y_test_factor))
 conf_mat
 accuracy <- conf_mat$overall['Accuracy']
 accuracy
+
+rf_probs <- predict(final_rf_model, newdata = x_test, type = "prob")[, "Yes"]
+
+# Predict classes
+rf_preds <- predict(final_rf_model, newdata = x_test)
+
+# Confusion matrix
+confusionMatrix(rf_preds, as.factor(y_test_factor))
 
 # AUC
 library(pROC)
@@ -344,6 +364,10 @@ n_2024_weather <- nrow(flight_24_full)
 test_indices <- sample(1:n_2024_weather, size = 0.3 * n_2024_weather)
 test_weather <- flight_24_full[test_indices, ] 
 
+colSums(is.na(train_weather))
+
+train_weather$dep_del15 <- as.numeric(train_weather$dep_del15)
+test_weather$dep_del15 <- as.numeric(test_weather$dep_del15)
 train_weather$op_unique_carrier <- as.factor(train_weather$op_unique_carrier)
 train_weather$dep_period <- as.factor(train_weather$dep_period)
 
@@ -352,6 +376,24 @@ test_weather$dep_period <- factor(test_weather$dep_period, levels = levels(train
 
 
 #Boosting
+
+#Refit with cross validation
+
+boost.fit <- gbm(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin,
+                         data = train_weather, 
+                         distribution = "bernoulli", n.trees = 5000, interaction.depth = 4)
+
+# Get predicted probabilities (values between 0 and 1)
+yhat.boost <- predict(boost.fit, newdata = test_weather, n.trees = 5000, type = "response")
+# If predicted probability > 0.5, predict 1 (delayed); otherwise 0 (on time)
+yhat.class <- ifelse(yhat.boost > 0.5, 1, 0)
+
+# Actual values
+y_true <- test_weather$dep_del15
+
+# Calculate accuracy
+accuracy <- mean(yhat.class == y_true)
+accuracy
 
 #Refit with cross validation
 boost.fit <- gbm(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin,
@@ -363,12 +405,20 @@ boost.fit <- gbm(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + 
                  cv.folds = 5,        # Add cross-validation!
                  n.cores = NULL,       # Use all cores
                  verbose = FALSE)
+
 best.iter <- gbm.perf(boost.fit, method = "cv") #Optimal number of trees ~ 1800
 yhat.boost <- predict(boost.fit, newdata = test_weather, n.trees = best.iter, type = "response")
 yhat.boost.class <- ifelse(yhat.boost > 0.5, 1, 0)
 mean(yhat.boost.class == test_weather$dep_del15)
 
 table(yhat.boost.class)
+
+best.iter <- gbm.perf(boost.fit2, method = "cv") #Optimal number of trees ~ 1800
+yhat.boost <- predict(boost.fit2, newdata = test_weather, n.trees = best.iter, type = "response")
+yhat.boost.class <- ifelse(yhat.boost > 0.5, 1, 0)
+mean(yhat.boost.class == test_weather$dep_del15)
+
+
 vi_boost <- summary(boost.fit, n.trees = best.iter, plotit = FALSE)
 
 # It already returns a data.frame with columns 'var' and 'rel.inf'
@@ -394,10 +444,13 @@ ggplot(vi_boost, aes(x = reorder(Variable, Importance), y = Importance)) +
 ```
 
 ```{r}
+library(xgboost)
+
 # Prepare your data as a matrix
 x_train <- model.matrix(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin, data = train_weather)[, -1]
 y_train <- train_weather$dep_del15
 x_test <- model.matrix(dep_del15 ~ op_unique_carrier + distance + dep_period + prcp + awnd + tmax + tmin, data = test_weather)[, -1]
+
 y_test <- test_weather$dep_del15  
 
 xgb.fit <- xgboost(data = x_train, label = y_train,
@@ -440,6 +493,7 @@ xgb.fit <- xgboost(
   verbose = 0
 )
 feature_names <- colnames(x_train)
+
 # Extract importance
 xgb.imp <- xgb.importance(feature_names = feature_names, model = xgb.fit)
 head(xgb.imp)
@@ -449,7 +503,9 @@ xgb.plot.importance(xgb.imp, top_n = 20, measure = "Gain",
 
 ```{r}
 # GBM variable importance (already extracted)
+
 vi_gbm <- summary(boost.fit, n.trees = best.iter, plotit = FALSE)
+
 colnames(vi_gbm) <- c("Variable", "Importance")
 vi_gbm$Model <- "GBM"
 # Assuming xgb.fit and x_train already created
@@ -469,7 +525,9 @@ top_vars <- vi_all %>%
   group_by(Model) %>%
   top_n(10, Importance)
 
-boost_compare_plot <- ggplot(top_vars, aes(x = reorder(Variable, Importance), y = Importance, fill = Model)) +
+
+boost_compare_plot <- 
+ggplot(top_vars, aes(x = reorder(Variable, Importance), y = Importance, fill = Model))
   geom_col(show.legend = FALSE) +
   coord_flip() +
   facet_wrap(~Model, scales = "free_y") +
@@ -481,18 +539,21 @@ boost_compare_plot <- ggplot(top_vars, aes(x = reorder(Variable, Importance), y 
         strip.text = element_text(size = 14),
         axis.text = element_text(size = 12),
         axis.title = element_text(size = 13))
+
 boost_compare_plot
 ggsave("variable_importance_boost.png", plot = boost_compare_plot, width = 8, height = 6, dpi = 300)
-
 
 ```
 
 ```{r}
 
-
-
 # Predictions (raw probabilities)
 prob_gbm <- predict(boost.fit, newdata = test_weather, n.trees = best.iter, type = "response")
+# True labels (0 or 1)
+y_test <- test_weather$dep_del15  
+
+# Predictions (raw probabilities)
+prob_gbm <- predict(boost.fit2, newdata = test_weather, n.trees = best.iter, type = "response")
 prob_xgb <- predict(xgb.fit, newdata = x_test)
 prob_rf  <- predict(rf.fit.w, newdata = test_weather, type = "prob")[,2]
 
@@ -500,6 +561,7 @@ prob_rf  <- predict(rf.fit.w, newdata = test_weather, type = "prob")[,2]
 pred_gbm <- ifelse(prob_gbm > 0.5, 1, 0)
 pred_xgb <- ifelse(prob_xgb > 0.5, 1, 0)
 pred_rf  <- ifelse(rf_probs  > 0.5, 1, 0)
+pred_rf  <- ifelse(prob_rf  > 0.5, 1, 0)
 
 # Confusion matrix & Accuracy
 cm_gbm <- confusionMatrix(factor(pred_gbm), factor(y_test))
