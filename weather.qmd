@@ -166,6 +166,8 @@ flight_24_full <- flight_24 |>
   left_join(weather2024, by = c("fl_date" = "date", "origin" = "origin")) |>
   mutate(weather = case_when(weather_delay == 0 ~ "0",
                               weather_delay > 0 ~ "1"),
+         carrier = case_when(carrier_delay == 0 ~ "0",
+                              carrier_delay > 0 ~ "1"),
          prcp = if_else(is.na(prcp), 0, prcp),
          awnd = if_else(is.na(awnd), 0, awnd))|>
   filter(weather != "NA")
